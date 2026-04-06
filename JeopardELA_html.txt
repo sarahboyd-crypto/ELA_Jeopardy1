@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AASA 4th Grade Prep Jeopardy - Buzzer Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Configuration (provided by environment)
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // Ensure appId is consistent and used correctly in paths
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'aasa-jeopardy-buzzer';
+
+        // State variables
+        let role = null; // 'teacher' or 'student'
+        let currentSessionId = null;
+        let myTeamId = null;
+        let user = null;
+
+        // UI Elements
+        const setupView = document.getElementById('setup-view');
+        const gameView = document.getElementById('game-view');
+        const studentView = document.getElementById('student-view');
+        const buzzerStatus = document.getElementById('buzzer-status');
+
+        const gameData = [
+            {
+                category: "Math: Ops",
+                questions: [
+                    { v: 100, q: "What is the product of 12 and 8?", a: "96" },
+                    { v: 200, q: "Solve: 4,302 - 1,285", a: "3,017" },
+                    { v: 300, q: "A bakery has 48 cookies. They put them into boxes of 6. How many boxes do they fill?", a: "8 boxes" },
+                    { v: 400, q: "What is the remainder of 25 ÷ 4?", a: "1" },
+                    { v: 500, q: "Solve: 45 x 23", a: "1,035" }
+                ]
+            },
+            {
+                category: "Math: Fractions",
+                questions: [
+                    { v: 100, q: "What is an equivalent fraction for 1/2?", a: "2/4, 3/6, 4/8, 50/100, etc." },
+                    { v: 200, q: "Compare these fractions: 2/3 and 2/5. Which is larger?", a: "2/3" },
+                    { v: 300, q: "Add: 2/10 + 45/100 (Hint: Make the denominators the same!)", a: "65/100" },
+                    { v: 400, q: "Write 0.7 as a fraction.", a: "7/10" },
+                    { v: 500, q: "Subtract: 1 - 3/8", a: "5/8" }
+                ]
+            },
+            {
+                category: "Reading",
+                questions: [
+                    { v: 100, q: "What do you call the main person in a story?", a: "Protagonist or Main Character" },
+                    { v: 200, q: "What is a 'Theme' in a story?", a: "The lesson or message the author wants you to learn." },
+                    { v: 300, q: "If a text is 'Chronological', how is it organized?", a: "By time or in order of events." },
+                    { v: 400, q: "What is the difference between a first-person and third-person narrator?", a: "1st person uses 'I/me'; 3rd person uses 'he/she/they'." },
+                    { v: 500, q: "Define 'Simile'.", a: "A comparison using 'like' or 'as'." }
+                ]
+            },
+            {
+                category: "Writing/Grammar",
+                questions: [
+                    { v: 100, q: "Which word should be capitalized in: 'we are going to phoenix tomorrow'?", a: "We (start) and Phoenix (city)." },
+                    { v: 200, q: "What is the plural form of the word 'Leaf'?", a: "Leaves" },
+                    { v: 300, q: "Identify the verb in this sentence: 'The fast horse galloped across the field.'", a: "Galloped" },
+                    { v: 400, q: "Where does the comma go? 'Yes I would like some water.'", a: "After 'Yes'" },
+                    { v: 500, q: "What is a 'conjunction'?", a: "A connecting word like: and, but, or, so." }
+                ]
+            },
+            {
+                category: "AZ & Science",
+                questions: [
+                    { v: 100, q: "What are the three main states of matter?", a: "Solid, Liquid, and Gas." },
+                    { v: 200, q: "Arizona is known as the ______ State.", a: "Grand Canyon State." },
+                    { v: 300, q: "What are the 5 C's of Arizona?", a: "Copper, Cattle, Cotton, Citrus, and Climate." },
+                    { v: 400, q: "What is an 'Inference'?", a: "A conclusion reached based on evidence." },
+                    { v: 500, q: "What energy source comes from the sun?", a: "Solar Energy." }
+                ]
+            }
+        ];
+
+        // Helper to get a valid Firestore document reference (must have 6 segments)
+        // Path: artifacts -> {appId} -> public -> data -> {collection} -> {docId}
+        // However, standard instruction says: /artifacts/{appId}/public/data/{collectionName}/{documentId}
+        // Let's stick to the 6-segment requirement: /artifacts/{appId}/public/data/{collectionName}/{documentId}
+        function getSessionRef(sid) {
+            return doc(db, 'artifacts', appId, 'public', 'data', 'sessions', sid);
+        }
+
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+            }
+
+            onAuthStateChanged(auth, (u) => {
+                user = u;
+                if (u) {
+                    document.getElementById('auth-loading').classList.add('hidden');
+                    setupView.classList.remove('hidden');
+                }
+            });
+        }
+
+        window.createGame = async () => {
+            if (!user) return;
+            const sid = Math.random().toString(36).substring(2, 8).toUpperCase();
+            currentSessionId = sid;
+            role = 'teacher';
+            
+            const sessionRef = getSessionRef(sid);
+            
+            await setDoc(sessionRef, {
+                activeQuestion: null,
+                buzzedBy: null,
+                scores: [0, 0, 0, 0, 0, 0],
+                disabledCards: [],
+                createdAt: Date.now()
+            });
+
+            startSync(sid);
+            setupView.classList.add('hidden');
+            gameView.classList.remove('hidden');
+            document.getElementById('join-code-display').innerText = `JOIN CODE: ${sid}`;
+            initBoard();
+        };
+
+        window.joinGame = async () => {
+            if (!user) return;
+            const sid = document.getElementById('join-input').value.toUpperCase();
+            const teamNum = parseInt(document.getElementById('team-select').value);
+            
+            if (!sid) return showToast("Enter a code!");
+            
+            const sessionRef = getSessionRef(sid);
+            const snap = await getDoc(sessionRef);
+            
+            if (snap.exists()) {
+                currentSessionId = sid;
+                myTeamId = teamNum;
+                role = 'student';
+                startSync(sid);
+                setupView.classList.add('hidden');
+                studentView.classList.remove('hidden');
+                document.getElementById('student-team-display').innerText = `TEAM ${teamNum}`;
+            } else {
+                showToast("Game not found!");
+            }
+        };
+
+        function startSync(sid) {
+            const sessionRef = getSessionRef(sid);
+            onSnapshot(sessionRef, (snap) => {
+                const data = snap.data();
+                if (!data) return;
+
+                // Sync scores
+                data.scores.forEach((s, i) => {
+                    const el = document.getElementById(`score-${i}`);
+                    if (el) el.innerText = s;
+                });
+
+                // Sync Buzzer
+                if (data.buzzedBy !== null) {
+                    const teamName = `TEAM ${data.buzzedBy + 1}`;
+                    buzzerStatus.innerText = `${teamName} BUZZED IN!`;
+                    buzzerStatus.className = "text-3xl font-bold text-yellow-400 animate-bounce";
+                    if (role === 'student') {
+                         document.getElementById('buzzer-btn').disabled = true;
+                         document.getElementById('buzzer-btn').innerText = "LOCKED OUT";
+                    }
+                } else {
+                    buzzerStatus.innerText = data.activeQuestion ? "GET READY TO BUZZ!" : "Waiting for question...";
+                    buzzerStatus.className = "text-xl text-blue-300";
+                    if (role === 'student') {
+                        document.getElementById('buzzer-btn').disabled = !data.activeQuestion;
+                        document.getElementById('buzzer-btn').innerText = data.activeQuestion ? "BUZZ!" : "WAITING...";
+                    }
+                }
+
+                // Sync Question View
+                if (role === 'student' && data.activeQuestion) {
+                    const [catIdx, qIdx] = data.activeQuestion.split('-').map(Number);
+                    const q = gameData[catIdx].questions[qIdx];
+                    document.getElementById('student-question').innerText = q.q;
+                    document.getElementById('student-val').innerText = `$${q.v}`;
+                } else if (role === 'student') {
+                    document.getElementById('student-question').innerText = "Watch the main board!";
+                    document.getElementById('student-val').innerText = "";
+                }
+
+                // Sync Board Disabled State
+                data.disabledCards.forEach(id => {
+                    const card = document.getElementById(`card-${id}`);
+                    if (card) {
+                        card.classList.add('disabled');
+                        card.innerText = "";
+                    }
+                });
+            }, (err) => {
+                console.error("Snapshot error:", err);
+                showToast("Sync Error: Check Console");
+            });
+        }
+
+        window.buzzerClick = async () => {
+            if (!user || !currentSessionId || role !== 'student' || myTeamId === null) return;
+            const sessionRef = getSessionRef(currentSessionId);
+            const snap = await getDoc(sessionRef);
+            const data = snap.data();
+            
+            if (data.activeQuestion && data.buzzedBy === null) {
+                await updateDoc(sessionRef, { buzzedBy: myTeamId - 1 });
+            }
+        };
+
+        window.resetBuzzer = async () => {
+            if (!user || !currentSessionId) return;
+            const sessionRef = getSessionRef(currentSessionId);
+            await updateDoc(sessionRef, { buzzedBy: null });
+        };
+
+        // UI Board Logic
+        function initBoard() {
+            const board = document.getElementById('game-board');
+            board.innerHTML = "";
+            gameData.forEach(cat => {
+                const head = document.createElement('div');
+                head.className = 'category-header';
+                head.innerText = cat.category;
+                board.appendChild(head);
+            });
+            for (let i = 0; i < 5; i++) {
+                gameData.forEach((cat, catIdx) => {
+                    const qData = cat.questions[i];
+                    const id = `${catIdx}-${i}`;
+                    const card = document.createElement('div');
+                    card.id = `card-${id}`;
+                    card.className = 'card';
+                    card.innerText = `$${qData.v}`;
+                    card.onclick = () => openQuestion(catIdx, i, id);
+                    board.appendChild(card);
+                });
+            }
+
+            const scoreBoard = document.getElementById('scoreboard-container');
+            scoreBoard.innerHTML = "";
+            for (let t = 0; t < 6; t++) {
+                const tBox = document.createElement('div');
+                tBox.className = 'team-box';
+                tBox.innerHTML = `
+                    <div class="text-xs text-gray-400 font-bold uppercase">Team ${t+1}</div>
+                    <div id="score-${t}" class="score-val">0</div>
+                    <div>
+                        <button onclick="updateScore(${t}, -100)" class="score-btn">-</button>
+                        <button onclick="updateScore(${t}, 100)" class="score-btn">+</button>
+                    </div>
+                `;
+                scoreBoard.appendChild(tBox);
+            }
+        }
+
+        async function openQuestion(catIdx, qIdx, id) {
+            if (!user || !currentSessionId) return;
+            const sessionRef = getSessionRef(currentSessionId);
+            const snap = await getDoc(sessionRef);
+            if (snap.data().disabledCards.includes(id)) return;
+
+            const data = gameData[catIdx].questions[qIdx];
+            document.getElementById('modal-cat').innerText = `${gameData[catIdx].category} - $${data.v}`;
+            document.getElementById('modal-q').innerText = data.q;
+            document.getElementById('modal-a').innerText = `ANSWER: ${data.a}`;
+            document.getElementById('modal-a').style.display = 'none';
+            document.getElementById('reveal-btn').style.display = 'block';
+            document.getElementById('modal').style.display = 'flex';
+
+            await updateDoc(sessionRef, {
+                activeQuestion: id,
+                disabledCards: [...snap.data().disabledCards, id],
+                buzzedBy: null
+            });
+        }
+
+        window.closeModal = async () => {
+            if (!user || !currentSessionId) return;
+            document.getElementById('modal').style.display = 'none';
+            const sessionRef = getSessionRef(currentSessionId);
+            await updateDoc(sessionRef, { activeQuestion: null, buzzedBy: null });
+        };
+
+        window.revealAnswer = () => {
+            document.getElementById('modal-a').style.display = 'block';
+            document.getElementById('reveal-btn').style.display = 'none';
+        };
+
+        window.updateScore = async (teamIdx, amount) => {
+            if (!user || !currentSessionId) return;
+            const sessionRef = getSessionRef(currentSessionId);
+            const snap = await getDoc(sessionRef);
+            let newScores = [...snap.data().scores];
+            newScores[teamIdx] += amount;
+            await updateDoc(sessionRef, { scores: newScores });
+        };
+
+        function showToast(msg) {
+            const t = document.createElement('div');
+            t.className = "fixed top-5 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded shadow-lg z-[2000]";
+            t.innerText = msg;
+            document.body.appendChild(t);
+            setTimeout(() => t.remove(), 2000);
+        }
+
+        initAuth();
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Bungee+Inline&family=Inter:wght@400;700&display=swap');
+        body { background-color: #060ce9; color: white; font-family: 'Inter', sans-serif; min-height: 100vh; margin: 0; }
+        .jeopardy-title { font-family: 'Bungee Inline', cursive; text-shadow: 3px 3px 0px #000; }
+        .grid-container { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 20px; }
+        .category-header { background: #060ce9; border: 3px solid black; text-align: center; font-weight: bold; padding: 10px; min-height: 70px; display: flex; align-items: center; justify-content: center; text-transform: uppercase; }
+        .card { background: #060ce9; border: 3px solid black; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: #ffcc00; font-weight: bold; cursor: pointer; }
+        .card.disabled { color: #000b8a; background: #0408a1; cursor: default; }
+        #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 1000; flex-direction: column; align-items: center; justify-content: center; padding: 20px; }
+        .score-board { display: grid; grid-template-columns: repeat(6, 1fr); background: #000; border-top: 4px solid #ffcc00; padding: 10px; }
+        .team-box { text-align: center; border-right: 1px solid #333; }
+        .buzzer-btn { width: 200px; height: 200px; border-radius: 50%; background: #ff0000; border: 10px solid #880000; font-size: 2rem; font-weight: bold; color: white; box-shadow: 0 10px 0 #660000; transition: all 0.1s; }
+        .buzzer-btn:active { transform: translateY(8px); box-shadow: 0 2px 0 #660000; }
+        .buzzer-btn:disabled { background: #444; border-color: #222; box-shadow: none; transform: translateY(8px); color: #888; cursor: not-allowed; }
+        .score-btn { background: #333; padding: 2px 10px; margin: 0 5px; border-radius: 4px; }
+    </style>
+</head>
+<body class="flex flex-col">
+
+    <div id="auth-loading" class="fixed inset-0 bg-blue-900 flex items-center justify-center z-[3000]">
+        <div class="text-xl text-white">Initializing Game Engine...</div>
+    </div>
+
+    <!-- Setup Screen -->
+    <div id="setup-view" class="hidden flex-grow flex flex-col items-center justify-center p-10 space-y-10">
+        <h1 class="jeopardy-title text-6xl text-yellow-400">AASA JEOPARDY</h1>
+        <div class="grid md:grid-cols-2 gap-10 w-full max-w-4xl">
+            <div class="bg-blue-800 p-8 rounded-xl border-4 border-black text-center shadow-2xl">
+                <h2 class="text-3xl font-bold mb-4">TEACHER</h2>
+                <p class="mb-6">Host the game on a big screen.</p>
+                <button onclick="createGame()" class="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-4 rounded-lg text-xl">START NEW SESSION</button>
+            </div>
+            <div class="bg-blue-800 p-8 rounded-xl border-4 border-black text-center shadow-2xl">
+                <h2 class="text-3xl font-bold mb-4">STUDENT</h2>
+                <p class="mb-6">Join with a code to buzz in.</p>
+                <input id="join-input" type="text" placeholder="ENTER CODE" class="w-full mb-4 p-3 rounded text-black text-center font-bold text-xl uppercase">
+                <select id="team-select" class="w-full mb-4 p-3 rounded text-black font-bold">
+                    <option value="1">Team 1</option>
+                    <option value="2">Team 2</option>
+                    <option value="3">Team 3</option>
+                    <option value="4">Team 4</option>
+                    <option value="5">Team 5</option>
+                    <option value="6">Team 6</option>
+                </select>
+                <button onclick="joinGame()" class="w-full bg-green-500 hover:bg-green-400 text-white font-bold py-4 rounded-lg text-xl">JOIN GAME</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Teacher/Main View -->
+    <div id="game-view" class="hidden flex-grow flex flex-col">
+        <header class="flex justify-between items-center p-4 bg-black/50">
+            <div>
+                <h1 class="jeopardy-title text-2xl text-yellow-400">AASA PREP</h1>
+                <div id="join-code-display" class="text-blue-300 font-mono font-bold"></div>
+            </div>
+            <div id="buzzer-status" class="text-xl text-blue-200 uppercase">Waiting...</div>
+            <button onclick="resetBuzzer()" class="bg-red-600 hover:bg-red-500 px-4 py-2 rounded text-sm font-bold">RESET BUZZER</button>
+        </header>
+
+        <div class="grid-container" id="game-board"></div>
+
+        <div class="score-board" id="scoreboard-container">
+            <!-- Populated by JS -->
+        </div>
+    </div>
+
+    <!-- Student Buzzer View -->
+    <div id="student-view" class="hidden flex-grow flex flex-col items-center justify-between p-10 bg-blue-950">
+        <div id="student-team-display" class="text-2xl font-bold text-yellow-400">TEAM 1</div>
+        
+        <div class="text-center">
+            <div id="student-val" class="text-4xl text-yellow-400 font-bold mb-2"></div>
+            <div id="student-question" class="text-2xl italic text-gray-300 max-w-lg"></div>
+        </div>
+
+        <button id="buzzer-btn" onclick="buzzerClick()" class="buzzer-btn">BUZZ!</button>
+
+        <div id="student-status" class="text-xl text-blue-300">Ready</div>
+    </div>
+
+    <!-- Teacher Question Modal -->
+    <div id="modal">
+        <div id="modal-cat" class="text-yellow-400 text-2xl mb-4 font-bold uppercase"></div>
+        <div id="modal-q" class="text-4xl md:text-6xl mb-10 leading-tight text-center max-w-5xl"></div>
+        <div id="modal-a" class="text-3xl text-green-400 border-2 border-dashed border-green-400 p-6 mb-10 hidden"></div>
+        
+        <div class="flex gap-6">
+            <button onclick="revealAnswer()" id="reveal-btn" class="bg-yellow-500 text-black font-bold px-8 py-4 rounded-xl text-xl">REVEAL ANSWER</button>
+            <button onclick="closeModal()" class="bg-red-600 text-white font-bold px-8 py-4 rounded-xl text-xl">CLOSE</button>
+        </div>
+    </div>
+
+</body>
+</html>
